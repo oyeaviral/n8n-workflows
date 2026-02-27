@@ -1,0 +1,74 @@
+{
+  "name": "Deals Daily Summary (Placeholder)",
+  "active": false,
+  "nodes": [
+    {
+      "id": "c1",
+      "name": "Cron 23:59",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [260, 340],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            { "mode": "everyDay", "hours": 23, "minutes": 59 }
+          ]
+        }
+      },
+      "notes": "Reads your log (CSV or Sheet), aggregates counts, and posts a summary to Deals source channel.",
+      "disabled": true
+    },
+    {
+      "id": "c2",
+      "name": "(TODO) Read Log",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 1,
+      "position": [520, 340],
+      "parameters": {
+        "operation": "read",
+        "fileFormat": "csv",
+        "options": { "headerRow": true },
+        "fileName": "deals_log.csv"
+      },
+      "disabled": true
+    },
+    {
+      "id": "c3",
+      "name": "Aggregate",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 2,
+      "position": [780, 340],
+      "parameters": {
+        "functionCode": "const rows = items;\nconst today = new Date().toISOString().slice(0,10);\nconst t = { BEAUTY:0, GOLD:0, PROTEIN:0, OTHER:0 };\nfor (const r of rows){ const c = (r.json.category||'OTHER').toUpperCase(); if (t[c]===undefined) t.OTHER++; else t[c]++; }\nconst text = `Daily Deals Summary (${today})\\nBeauty: ${t.BEAUTY}\\nGold: ${t.GOLD}\\nProtein+Gym: ${t.PROTEIN}\\nOther: ${t.OTHER}`;\nreturn [{ json: { text } }];"
+      },
+      "disabled": true
+    },
+    {
+      "id": "c4",
+      "name": "Send Summary → Deals Channel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1040, 340],
+      "parameters": {
+        "method": "POST",
+        "url": "https://gate.whapi.cloud/messages/text",
+        "sendBody": true,
+        "jsonParameters": true,
+        "options": {
+          "headers": {
+            "Authorization": "=Bearer {{$env.WHAPI_TOKEN}}",
+            "Content-Type": "application/json"
+          }
+        },
+        "bodyParametersJson": "={{ { to: '120363297399368172@newsletter', body: $json.text, typing_time: 0 } }}"
+      },
+      "disabled": true
+    }
+  ],
+  "connections": {
+    "Cron 23:59": { "main": [[{ "node": "(TODO) Read Log", "type": "main", "index": 0 }]] },
+    "(TODO) Read Log": { "main": [[{ "node": "Aggregate", "type": "main", "index": 0 }]] },
+    "Aggregate": { "main": [[{ "node": "Send Summary → Deals Channel", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
