@@ -1,0 +1,402 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "sheetId",
+              "value": "PASTE_YOUR_SHEET_ID_HERE"
+            },
+            {
+              "name": "sheetTab",
+              "value": "GoldDaily"
+            },
+            {
+              "name": "ibjaUrl",
+              "value": "https://ibjarates.com/"
+            },
+            {
+              "name": "mcxUrl",
+              "value": "https://mcxlive.org/gold/"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "5f33578e-ec78-4e92-8e96-f0b7197d3897",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.ibjaUrl}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "f1872c50-a7ca-41a3-bf28-abce4f2aa391",
+      "name": "Fetch IBJA HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        448,
+        -144
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// --- Read the HTML from the HTTP node output ---\n// Your HTTP node stores the HTML under `data` (NOT `body`):\nconst raw = $json.data ?? '';\nconst ibja_http_status = $json.statusCode ?? '';\n\n// --- IST timestamp & AM/PM session label ---\nconst now = new Date();\nconst ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));\nconst pulled_at_ist = ist.toISOString().replace('Z', '+05:30');\nconst session = ist.getHours() < 15 ? 'AM' : 'PM';\n\nlet errors = [];\n\n// ---------- Helpers ----------\nfunction unescapeBackslashes(s) {\n  // Convert literal \\n, \\t, \\\" and escaped < > into real characters\n  return String(s)\n    .replace(/\\\\u003c/gi, '<')\n    .replace(/\\\\u003e/gi, '>')\n    .replace(/\\\\n/g, '\\n')\n    .replace(/\\\\t/g, '\\t')\n    .replace(/\\\\r/g, '\\r')\n    .replace(/\\\\\"/g, '\"')\n    .replace(/\\\\\\//g, '/');\n}\n\nfunction decodeEntitiesOnce(s) {\n  // Decode HTML entities like &lt; &gt; &amp; etc.\n  return String(s)\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#039;/g, \"'\")\n    .replace(/&nbsp;/gi, ' ');\n}\n\nfunction toNumber(val) {\n  if (!val) return '';\n  const n = Number(String(val).replace(/,/g, '').trim());\n  return Number.isFinite(n) ? n : '';\n}\n\n// ---------- Decode the HTML (it’s double-encoded in your output) ----------\nlet html = raw;\nhtml = unescapeBackslashes(html);\nhtml = decodeEntitiesOnce(html);\nhtml = decodeEntitiesOnce(html);  // second pass often required\n\n// Optional: narrow to the TodayRatesTableDataYes table to reduce false matches\nconst anchor = html.indexOf('id=\"TodayRatesTableDataYes\"');\nif (anchor !== -1) {\n  html = html.slice(anchor, anchor + 120000);\n}\n\n// ---------- Extract <span id=\"...\">VALUE</span> by ID ----------\nfunction getSpanValue(id) {\n  const re = new RegExp(`<span[^>]*\\\\bid=[\"']${id}[\"'][^>]*>([\\\\s\\\\S]*?)<\\\\/span>`, 'i');\n  const m = html.match(re);\n  if (!m) return '';\n  const val = (m[1] || '').trim();\n  return toNumber(val);\n}\n\n// Required IBJA fields (AM/PM PM may be blank until published)\nconst ibja_gold_999_am   = getSpanValue('lblGold999_AM');\nconst ibja_gold_999_pm   = getSpanValue('lblGold999_PM');\nconst ibja_gold_916_am   = getSpanValue('lblGold916_AM');\nconst ibja_gold_916_pm   = getSpanValue('lblGold916_PM');\nconst ibja_silver_999_am = getSpanValue('lblSilver999_AM');\nconst ibja_silver_999_pm = getSpanValue('lblSilver999_PM');\n\n// ---------- Date detection ----------\n// 1) Try to read \"dd/mm/yyyy\" anywhere in decoded HTML\nlet ibja_date = '';\nconst d1 = html.match(/\\b(\\d{2}\\/\\d{2}\\/\\d{4})\\b/);\nif (d1) ibja_date = d1[1];\n\n// 2) Fallback: derive from the “Previous 30 Days” PDF link (yyyymmdd in filename)\nif (!ibja_date) {\n  const m = html.match(/Pdf_\\d+_(\\d{8})\\d+_Daily/i);\n  if (m) {\n    const yyyymmdd = m[1];\n    ibja_date = `${yyyymmdd.slice(6, 8)}/${yyyymmdd.slice(4, 6)}/${yyyymmdd.slice(0, 4)}`;\n  }\n}\n\n// ---------- Diagnostics (helpful if something is still blank) ----------\nif (!html.toLowerCase().includes('lblgold999_am')) {\n  errors.push('Decoded HTML does not include lblGold999_AM (verify HTTP node Response Format=String and reading from `data`)');\n}\nif (!ibja_date) errors.push('IBJA date not found');\nif (ibja_gold_999_am === '' && ibja_gold_999_pm === '') errors.push('IBJA gold 999 not parsed');\nif (ibja_gold_916_am === '' && ibja_gold_916_pm === '') errors.push('IBJA gold 916 not parsed');\nif (ibja_silver_999_am === '' && ibja_silver_999_pm === '') errors.push('IBJA silver 999 not parsed');\n\n// ---------- IMPORTANT: return a SINGLE object (no arrays) ----------\nreturn {\n  json: {\n    pulled_at_ist,\n    session,\n    ibja_date,\n    ibja_gold_999_am,\n    ibja_gold_999_pm,\n    ibja_gold_916_am,\n    ibja_gold_916_pm,\n    ibja_silver_999_am,\n    ibja_silver_999_pm,\n    ibja_http_status,\n    ibja_source: 'https://ibjarates.com/',\n    errors: errors.join(' | ')\n  }\n};"
+      },
+      "id": "9bcc611d-3e1a-4577-8799-770d23d35c77",
+      "name": "Parse IBJA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        -144
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.mcxUrl}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "e19deea0-0da1-4ed0-8f3f-e4e2620a4989",
+      "name": "Fetch MCX HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        80
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Read HTML from HTTP node (data preferred; fallback body)\nconst raw = $json.data ?? $json.body ?? '';\nconst mcx_http_status = $json.statusCode ?? '';\n\nfunction unescapeBackslashes(s) {\n  return String(s)\n    .replace(/\\\\u003c/gi, '<')\n    .replace(/\\\\u003e/gi, '>')\n    .replace(/\\\\n/g, '\\n')\n    .replace(/\\\\t/g, '\\t')\n    .replace(/\\\\r/g, '\\r')\n    .replace(/\\\\\"/g, '\"')\n    .replace(/\\\\\\//g, '/');\n}\nfunction decodeEntitiesOnce(s) {\n  return String(s)\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#039;/g, \"'\")\n    .replace(/&nbsp;/gi, ' ');\n}\nfunction num(s) {\n  if (!s) return '';\n  const n = Number(String(s).replace(/[^\\d.+-]/g, '').replace(/\\+/g, ''));\n  return Number.isFinite(n) ? n : '';\n}\n\n// 1) Decode the page (entities + backslash escapes)\nlet html = raw;\nhtml = unescapeBackslashes(html);\nhtml = decodeEntitiesOnce(html);\n\n// 2) Contract: from <h2 class=\"main-head\">MCX Gold 02 Apr 2026</h2>\nlet mcx_contract = '';\n{\n  const m = html.match(/<h2[^>]*class=[\"']main-head[\"'][^>]*>\\s*MCX\\s+Gold\\s+([^<]+)<\\/h2>/i);\n  mcx_contract = m ? m[1].trim() : '';\n}\n\n// 3) Last Trade / Change / Change%\n// Pattern in your page:\n// <td class=\"one-third\">Last Trade</td> ... <td class=\"main-change ...\"> 158,100</td>\n// <td class=\"main-change ...\"> +34</td>\n// <td class=\"main-change ...\">+0.02%</td>\nlet mcx_last = '', mcx_change = '', mcx_change_pct = '';\n{\n  // Grab the block of the first \"Last Trade\" table\n  const block = html.match(/<table[^>]*class=[\"']main-table[^\"']*bold[^\"']*[\"'][\\s\\S]*?<td[^>]*>\\s*Last\\s*Trade\\s*<\\/td>[\\s\\S]*?<\\/table>/i);\n  if (block) {\n    const tbl = block[0];\n    const cells = [...tbl.matchAll(/<td[^>]*class=[\"']main-change[^\"']*[\"'][^>]*>([\\s\\S]*?)<\\/td>/gi)];\n    if (cells.length >= 3) {\n      // Clean each cell's text\n      const clean = (s) => decodeEntitiesOnce(s.replace(/<[^>]*>/g, ' ')).replace(/\\s+/g, ' ').trim();\n      mcx_last = num(clean(cells[0][1]));\n      mcx_change = num(clean(cells[1][1]));\n      const pctText = clean(cells[2][1]).replace('%','');\n      mcx_change_pct = num(pctText);\n    }\n  }\n}\n\n// 4) High / Low / Open\n// Pattern:\n// <table class=\"main-table bold\"> ... <td>High</td> <td>Low</td> <td>Open</td> ...\n// <td class=\"main-sub\"> 158,294</td> <td class=\"main-sub\"> 156,001</td> <td class=\"main-sub\"> 158,066</td>\nlet mcx_high = '', mcx_low = '', mcx_open = '';\n{\n  const block = html.match(/<table[^>]*class=[\"']main-table[^\"']*bold[^\"']*[\"'][\\s\\S]*?<td[^>]*>\\s*High\\s*<\\/td>[\\s\\S]*?<td[^>]*>\\s*Low\\s*<\\/td>[\\s\\S]*?<td[^>]*>\\s*Open\\s*<\\/td>[\\s\\S]*?<\\/table>/i);\n  if (block) {\n    const tbl = block[0];\n    const vals = [...tbl.matchAll(/<td[^>]*class=[\"']main-sub[\"'][^>]*>([\\s\\S]*?)<\\/td>/gi)];\n    if (vals.length >= 3) {\n      const clean = (s) => decodeEntitiesOnce(s.replace(/<[^>]*>/g, ' ')).replace(/\\s+/g, ' ').trim();\n      mcx_high = num(clean(vals[0][1]));\n      mcx_low  = num(clean(vals[1][1]));\n      mcx_open = num(clean(vals[2][1]));\n    }\n  }\n}\n\n// Diagnostics\nlet errors = ($json.errors ? [$json.errors] : []).filter(Boolean);\nif (!raw || raw.length < 1000) errors.push(`MCX HTML too small (${raw ? raw.length : 0}) - check HTTP URL & Response Format=String`);\nif (!mcx_last) errors.push('MCX last trade not parsed (check table HTML/regex)');\nif (!mcx_contract) errors.push('MCX contract not parsed');\n\n// Return a single object (no arrays)\nreturn {\n  json: {\n    ...$json, // keep prior fields (e.g., IBJA values) if present\n    mcx_contract,\n    mcx_last,\n    mcx_change,\n    mcx_change_pct,\n    mcx_high,\n    mcx_low,\n    mcx_open,\n    mcx_http_status,\n    mcx_source: 'https://mcxlive.org/gold/',\n    errors: errors.filter(Boolean).join(' | ')\n  }\n};"
+      },
+      "id": "470e5596-007a-4d9c-8254-213b09853476",
+      "name": "Parse MCX",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI",
+          "mode": "list",
+          "cachedResultName": "GoldDaily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Daily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "ibja_date"
+          ],
+          "schema": [
+            {
+              "id": "pulled_at_ist",
+              "displayName": "pulled_at_ist",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_date",
+              "displayName": "ibja_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_999_am",
+              "displayName": "ibja_gold_999_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_999_pm",
+              "displayName": "ibja_gold_999_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_916_am",
+              "displayName": "ibja_gold_916_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_916_pm",
+              "displayName": "ibja_gold_916_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_silver_999_am",
+              "displayName": "ibja_silver_999_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_silver_999_pm",
+              "displayName": "ibja_silver_999_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_http_status",
+              "displayName": "ibja_http_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_source",
+              "displayName": "ibja_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "errors",
+              "displayName": "errors",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "05b10b5d-efcd-4801-8e84-f5f0c2dba064",
+      "name": "Append to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        896,
+        -144
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZvQluMAvJ70mSOdu",
+          "name": "Google Sheets account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "to": "120363408105589243@newsletter",
+        "typing_time": 8,
+        "body": "=*💰TODAY’S GOLD & SILVER RATES*\n\n*🏅24K (999):*\nOpen: ₹{{ $json.ibja_gold_999_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_999_pm }} *Per 10g*\n\n*🥇22K (916):*\nOpen: ₹{{ $json.ibja_gold_916_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_916_pm }} *Per 10g*\n\n*🥈Silver 999:*\nOpen: ₹{{ $json.ibja_silver_999_am }} */kg*\nClose: ₹{{ $json.ibja_silver_999_pm }} */kg*\n\n```Note: 1️⃣ Rates exclude GST & Making Charges. 2️⃣ IBJA rates are the industry standard for Banks & NBFCs. 3️⃣ For information only; not affiliated with IBJA.```"
+      },
+      "type": "n8n-nodes-whapi.whapi",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        -144
+      ],
+      "id": "e19698b5-8a69-4072-ad09-40203fa78f42",
+      "name": "Send the message",
+      "credentials": {
+        "whapiChannelApi": {
+          "id": "KoBUMSim9nXfiCjS",
+          "name": "Whapi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Channel address:\n120363408105589243@newsletter\n\n(test) My Address\n918952813389@s.whatsapp.net"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        960,
+        64
+      ],
+      "id": "0e4a3990-4173-44dd-a247-096a6d7b9f11",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 8,
+              "minute": 1
+            },
+            {
+              "hour": 13,
+              "minute": 40
+            }
+          ]
+        }
+      },
+      "id": "56ad7ec3-0911-470c-9093-a9dd1525b0c5",
+      "name": "Cron (Daily 12:31 & 18:40 IST)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -144
+      ]
+    }
+  ],
+  "connections": {
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch IBJA HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch IBJA HTML": {
+      "main": [
+        [
+          {
+            "node": "Parse IBJA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse IBJA": {
+      "main": [
+        [
+          {
+            "node": "Append to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch MCX HTML": {
+      "main": [
+        [
+          {
+            "node": "Parse MCX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse MCX": {
+      "main": [
+        []
+      ]
+    },
+    "Append to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Send the message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron (Daily 12:31 & 18:40 IST)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f942f3e149662d29771bc0758b499f2350aca1856aa9f3256266557881851681"
+  }
+}
