@@ -1,0 +1,800 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "sheetId",
+              "value": "PASTE_YOUR_SHEET_ID_HERE"
+            },
+            {
+              "name": "sheetTab",
+              "value": "GoldDaily"
+            },
+            {
+              "name": "ibjaUrl",
+              "value": "https://ibjarates.com/"
+            },
+            {
+              "name": "mcxUrl",
+              "value": "https://mcxlive.org/gold/"
+            },
+            {
+              "name": "goodreturnsgoldurl",
+              "value": "https://www.goodreturns.in/gold-rates/"
+            },
+            {
+              "name": "goodreturnssilverurl",
+              "value": "https://www.goodreturns.in/silver-rates/"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e4e90f6a-4aa4-43fa-bca7-a7c2c8b16b33",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        224,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.ibjaUrl}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "8f4f1c6f-7da0-496c-9f3b-b8ce35e29af9",
+      "name": "Fetch IBJA HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        448,
+        272
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// --- Read the HTML from the HTTP node output ---\n// Your HTTP node stores the HTML under `data` (NOT `body`):\nconst raw = $json.data ?? '';\nconst ibja_http_status = $json.statusCode ?? '';\n\n// --- IST timestamp & AM/PM session label ---\nconst now = new Date();\nconst ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));\nconst pulled_at_ist = ist.toISOString().replace('Z', '+05:30');\nconst session = ist.getHours() < 15 ? 'AM' : 'PM';\n\nlet errors = [];\n\n// ---------- Helpers ----------\nfunction unescapeBackslashes(s) {\n  // Convert literal \\n, \\t, \\\" and escaped < > into real characters\n  return String(s)\n    .replace(/\\\\u003c/gi, '<')\n    .replace(/\\\\u003e/gi, '>')\n    .replace(/\\\\n/g, '\\n')\n    .replace(/\\\\t/g, '\\t')\n    .replace(/\\\\r/g, '\\r')\n    .replace(/\\\\\"/g, '\"')\n    .replace(/\\\\\\//g, '/');\n}\n\nfunction decodeEntitiesOnce(s) {\n  // Decode HTML entities like &lt; &gt; &amp; etc.\n  return String(s)\n    .replace(/&lt;/gi, '<')\n    .replace(/&gt;/gi, '>')\n    .replace(/&amp;/gi, '&')\n    .replace(/&quot;/gi, '\"')\n    .replace(/&#039;/g, \"'\")\n    .replace(/&nbsp;/gi, ' ');\n}\n\nfunction toNumber(val) {\n  if (!val) return '';\n  const n = Number(String(val).replace(/,/g, '').trim());\n  return Number.isFinite(n) ? n : '';\n}\n\n// ---------- Decode the HTML (it’s double-encoded in your output) ----------\nlet html = raw;\nhtml = unescapeBackslashes(html);\nhtml = decodeEntitiesOnce(html);\nhtml = decodeEntitiesOnce(html);  // second pass often required\n\n// Optional: narrow to the TodayRatesTableDataYes table to reduce false matches\nconst anchor = html.indexOf('id=\"TodayRatesTableDataYes\"');\nif (anchor !== -1) {\n  html = html.slice(anchor, anchor + 120000);\n}\n\n// ---------- Extract <span id=\"...\">VALUE</span> by ID ----------\nfunction getSpanValue(id) {\n  const re = new RegExp(`<span[^>]*\\\\bid=[\"']${id}[\"'][^>]*>([\\\\s\\\\S]*?)<\\\\/span>`, 'i');\n  const m = html.match(re);\n  if (!m) return '';\n  const val = (m[1] || '').trim();\n  return toNumber(val);\n}\n\n// Required IBJA fields (AM/PM PM may be blank until published)\nconst ibja_gold_999_am   = getSpanValue('lblGold999_AM');\nconst ibja_gold_999_pm   = getSpanValue('lblGold999_PM');\nconst ibja_gold_916_am   = getSpanValue('lblGold916_AM');\nconst ibja_gold_916_pm   = getSpanValue('lblGold916_PM');\nconst ibja_silver_999_am = getSpanValue('lblSilver999_AM');\nconst ibja_silver_999_pm = getSpanValue('lblSilver999_PM');\n\n// ---------- Date detection ----------\n// 1) Try to read \"dd/mm/yyyy\" anywhere in decoded HTML\nlet ibja_date = '';\nconst d1 = html.match(/\\b(\\d{2}\\/\\d{2}\\/\\d{4})\\b/);\nif (d1) ibja_date = d1[1];\n\n// 2) Fallback: derive from the “Previous 30 Days” PDF link (yyyymmdd in filename)\nif (!ibja_date) {\n  const m = html.match(/Pdf_\\d+_(\\d{8})\\d+_Daily/i);\n  if (m) {\n    const yyyymmdd = m[1];\n    ibja_date = `${yyyymmdd.slice(6, 8)}/${yyyymmdd.slice(4, 6)}/${yyyymmdd.slice(0, 4)}`;\n  }\n}\n\n// ---------- Diagnostics (helpful if something is still blank) ----------\nif (!html.toLowerCase().includes('lblgold999_am')) {\n  errors.push('Decoded HTML does not include lblGold999_AM (verify HTTP node Response Format=String and reading from `data`)');\n}\nif (!ibja_date) errors.push('IBJA date not found');\nif (ibja_gold_999_am === '' && ibja_gold_999_pm === '') errors.push('IBJA gold 999 not parsed');\nif (ibja_gold_916_am === '' && ibja_gold_916_pm === '') errors.push('IBJA gold 916 not parsed');\nif (ibja_silver_999_am === '' && ibja_silver_999_pm === '') errors.push('IBJA silver 999 not parsed');\n\n// ---------- IMPORTANT: return a SINGLE object (no arrays) ----------\nreturn {\n  json: {\n    pulled_at_ist,\n    session,\n    ibja_date,\n    ibja_gold_999_am,\n    ibja_gold_999_pm,\n    ibja_gold_916_am,\n    ibja_gold_916_pm,\n    ibja_silver_999_am,\n    ibja_silver_999_pm,\n    ibja_http_status,\n    ibja_source: 'https://ibjarates.com/',\n    errors: errors.join(' | ')\n  }\n};"
+      },
+      "id": "dc55a375-116a-4d01-ae42-19872e0a2610",
+      "name": "Parse IBJA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{$json.mcxUrl}}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "65a98d14-4cde-4bd4-8d37-1029915f8484",
+      "name": "Fetch MCX HTML",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        48
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "/**\n * MCX parser for mcxlive pages (gold/silver).\n * Place this Function node AFTER your \"Fetch MCX HTML\" HTTP node.\n * Works whether HTTP node returns html in json, json.data, or json.body.\n *\n * Output: ONE mandatory row (LTP). Optionally, emit High/Low/Open by toggling EMIT_EXTRA.\n *\n * Columns align with your Goodreturns/IBJA schema:\n *  - asOf, source, commodity, purity, unit, city, price, currency, (optional) pageDate\n *\n * Source pages:\n *  - https://mcxlive.org/gold/  (gold futures)  [1](https://indiaobservers.com/gold-rate-in-india-today-city-wise/)\n *  - https://mcxlive.org/silver/ (silver futures)\n */\n\nconst src  = items?.[0]?.json;\nconst html = typeof src === 'string' ? src : (src?.data ?? src?.body ?? '');\n\nif (!html) {\n  console.log('MCX HTML empty. Check HTTP node output (json / json.data / json.body).');\n  return [];\n}\n\nconst nowISO = new Date().toISOString();\nconst out = [];\nconst toNum = (s) => Number((s || '').replace(/[^\\d.-]/g, ''));\n\n// --------- Detect commodity (gold/silver) ----------\nlet commodity = 'gold';\ntry {\n  const urlHint = (src?.mcxurl || '').toLowerCase();\n  if (/silver/.test(urlHint) || /MCX\\s*Silver/i.test(html)) commodity = 'silver';\n} catch { /* keep default */ }\n\n// --------- Capture page banner time: \"As on ... India Time\" ----------\nlet pageDate = null;\nconst asOn = html.match(/As\\s+on\\s+([^<]+?)(?:,?\\s*India\\s*Time)?[<\\s]/i);\nif (asOn) pageDate = asOn[1].trim(); // e.g., \"Wednesday, 25 Feb 2026 11:50 AM\"  [1](https://indiaobservers.com/gold-rate-in-india-today-city-wise/)\n\n// --------- Find stats near the first \"Last Trade\" ----------\nfunction windowAround(labelRe, radius = 500) {\n  const m = html.match(labelRe);\n  if (!m) return null;\n  const i = m.index;\n  return html.slice(Math.max(0, i - radius), Math.min(html.length, i + radius));\n}\n\n// The mcxlive gold page shows: \"Last Trade\", then \"High Low Open\" close by.  [1](https://indiaobservers.com/gold-rate-in-india-today-city-wise/)\nconst block = windowAround(/Last\\s*Trade/i) || html.slice(0, 4000);\n\n// Generic grabber from the local block\nfunction grabOne(re) {\n  const m = block.match(re);\n  return m ? toNum(m[1]) : null;\n}\n\n// Tolerant patterns (ignore tags/spaces). Examples seen on page: \"Last Trade 161,262\", \"High 161,652\", \"Low 160,332\", \"Open 159,969\"\nconst ltp    = grabOne(/Last\\s*Trade[^0-9]*([\\d,]+)/i);\nconst high   = grabOne(/High[^0-9]*([\\d,]+)\\b/i);\nconst low    = grabOne(/Low[^0-9]*([\\d,]+)\\b/i);\nconst open   = grabOne(/Open[^0-9]*([\\d,]+)\\b/i);\n// Sometimes the page prints \"Change\" and \"Change in %\" too\nconst change = grabOne(/Change[^0-9+-]*([+-]?[\\d,]+)\\b/i);\nconst chgPct = grabOne(/Change\\s*in\\s*%[^0-9+-]*([+-]?[\\d.,]+)\\b/i);\n\nconsole.log('MCX parsed:', { commodity, ltp, high, low, open, change, chgPct, pageDate });\n\n// --------- Always emit the LTP row (contract) ----------\nif (ltp) {\n  const row = {\n    source: 'MCXLive (mcxlive.org)',\n    commodity,               // 'gold' or 'silver'\n    purity: 'futures',       // mark as futures contract data\n    unit: 'contract LTP',\n    city: 'MCX',\n    price: ltp,\n    currency: 'INR',\n    asOf: nowISO,\n  };\n  if (pageDate) row.pageDate = pageDate;\n  out.push(row);\n}\n\n// --------- OPTIONAL: also emit High/Low/Open as separate rows ----------\nconst EMIT_EXTRA = false; // set to true if you want these too\nif (EMIT_EXTRA) {\n  const pushX = (label, val) => {\n    if (!val) return;\n    const r = {\n      source: 'MCXLive (mcxlive.org)',\n      commodity,\n      purity: 'futures',\n      unit: label,           // 'High' | 'Low' | 'Open'\n      city: 'MCX',\n      price: val,\n      currency: 'INR',\n      asOf: nowISO,\n    };\n    if (pageDate) r.pageDate = pageDate;\n    out.push(r);\n  };\n  pushX('High', high);\n  pushX('Low',  low);\n  pushX('Open', open);\n}\n\nif (out.length === 0) {\n  console.log('No LTP found. Logging a snippet of the source block for debug:');\n  console.log((block || html).slice(0, 1500));\n}\n\nreturn out.map(r => ({ json: r }));"
+      },
+      "id": "2890f859-467a-4f63-be1f-05003ae3a94f",
+      "name": "Parse MCX",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI",
+          "mode": "list",
+          "cachedResultName": "GoldDaily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Daily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "ibja_date"
+          ],
+          "schema": [
+            {
+              "id": "pulled_at_ist",
+              "displayName": "pulled_at_ist",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "session",
+              "displayName": "session",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_date",
+              "displayName": "ibja_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_999_am",
+              "displayName": "ibja_gold_999_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_999_pm",
+              "displayName": "ibja_gold_999_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_916_am",
+              "displayName": "ibja_gold_916_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_gold_916_pm",
+              "displayName": "ibja_gold_916_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_silver_999_am",
+              "displayName": "ibja_silver_999_am",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_silver_999_pm",
+              "displayName": "ibja_silver_999_pm",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_http_status",
+              "displayName": "ibja_http_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ibja_source",
+              "displayName": "ibja_source",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "errors",
+              "displayName": "errors",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "890c5006-b8ed-4ee8-b6da-3cc3a5c4e442",
+      "name": "Append to Google Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        896,
+        272
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZvQluMAvJ70mSOdu",
+          "name": "Google Sheets account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "to": "918952813389@s.whatsapp.net",
+        "typing_time": 5,
+        "body": "=*💰TODAY’S GOLD & SILVER RATES (IBJA, Goodreturns)*\n\n*1️⃣ IBJA Rates:*\n\n*🏅24K (999):*\nOpen: ₹{{ $json.ibja_gold_999_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_999_pm }} *Per 10g*\n\n*🥇22K (916):*\nOpen: ₹{{ $json.ibja_gold_916_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_916_pm }} *Per 10g*\n\n*🥈Silver 999:*\nOpen: ₹{{ $json.ibja_silver_999_am }} */kg*\nClose: ₹{{ $json.ibja_silver_999_pm }} */kg*\n-----------------------------------\n*2️⃣ GOODRETURNS Rates:*\n\n*🏅24K (999):* ₹{{ $json['24K_999'] }} */g*\n*🥇22K (916):* ₹{{ $json['22K_916'] }} */g*\n*🥈Silver 999:* ₹{{ $json.Per_KG }} */kg* | ₹{{ $json.Per_Gram }} */g*\n-----------------------------------\n```Note: 1️⃣ Rates exclude GST & Making Charges. 2️⃣ IBJA rates are the industry standard for Banks & NBFCs. 3️⃣ For information only; not affiliated with IBJA or Goodreturns. DYOR.```"
+      },
+      "type": "n8n-nodes-whapi.whapi",
+      "typeVersion": 1,
+      "position": [
+        1344,
+        464
+      ],
+      "id": "c055d753-7d2c-4030-ba4c-939cddb2d8f6",
+      "name": "Send the message",
+      "credentials": {
+        "whapiChannelApi": {
+          "id": "KoBUMSim9nXfiCjS",
+          "name": "Whapi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Channel address:\n120363408105589243@newsletter\n\n(test) My Address\n918952813389@s.whatsapp.net"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        512,
+        48
+      ],
+      "id": "a65c53d3-077f-46d1-b428-51d27cb550de",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 8,
+              "minute": 1
+            },
+            {
+              "hour": 13,
+              "minute": 40
+            }
+          ]
+        }
+      },
+      "id": "2636e012-c145-4c37-9701-73b950a7152f",
+      "name": "Cron (Daily 12:31 & 18:40 IST)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        0,
+        464
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.goodreturnsgoldurl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Referer",
+              "value": "https://www.google.com/"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "id": "9770f6a5-ff1f-40ca-84ae-5136690f3cc5",
+      "name": "Fetch Goodreturns Gold",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        448,
+        464
+      ],
+      "alwaysOutputData": false,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.goodreturnssilverurl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Referer",
+              "value": "https://www.google.com/"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true,
+          "timeout": 30000
+        }
+      },
+      "id": "00f1bb70-04ee-4b21-9d27-2981b5bac2b3",
+      "name": "Fetch Goodreturns Silver",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        448,
+        656
+      ],
+      "alwaysOutputData": false,
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI",
+          "mode": "list",
+          "cachedResultName": "GoldDaily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 211590673,
+          "mode": "list",
+          "cachedResultName": "GoodreturnsGold",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit#gid=211590673"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {
+            "Timestamp": "={{ $json.asOf }}"
+          },
+          "matchingColumns": [
+            "Timestamp"
+          ],
+          "schema": [
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "24K_999",
+              "displayName": "24K_999",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "22K_916",
+              "displayName": "22K_916",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "18K_750",
+              "displayName": "18K_750",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "cbe851e7-0466-429f-9c9a-8c9c257cb5ea",
+      "name": "Append to Google Sheet1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        896,
+        464
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZvQluMAvJ70mSOdu",
+          "name": "Google Sheets account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI",
+          "mode": "list",
+          "cachedResultName": "GoldDaily",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 925511279,
+          "mode": "list",
+          "cachedResultName": "GoodreturnsSilver",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/161zn0MDfaNvxrpmsIFCXE8M4p86KBtr3OF4rx6I6ZrI/edit#gid=925511279"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "Timestamp"
+          ],
+          "schema": [
+            {
+              "id": "Timestamp",
+              "displayName": "Timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Per_Gram",
+              "displayName": "Per_Gram",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "Per_KG",
+              "displayName": "Per_KG",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "3a54947f-f807-4237-83a8-2ef5bd3f2550",
+      "name": "Append to Google Sheet2",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        896,
+        656
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ZvQluMAvJ70mSOdu",
+          "name": "Google Sheets account 5"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// FUNCTION node (Run Once for All Items)\n// Output ONE row with columns: Timestamp, Per_Gram, Per_KG\n\n// 1) Read the HTML from the previous HTTP node\nconst src = items?.[0]?.json;\nconst html = typeof src === 'string' ? src : (src?.data ?? src?.body ?? '');\nif (!html) { return []; }\n\nconst nowISO = new Date().toISOString();\nconst toNum = (s) => Number((s || '').replace(/[^\\d]/g, ''));\n\n// 2) Focus on the intro section that contains:\n//    \"The price of silver in India today is <strong>₹285</strong> per gram and <strong>₹2,85,000</strong> per kilogram.\"\nconst secMatch = html.match(/<section[^>]+id=[\"']gr_top_intro_content[\"'][^>]*>([\\s\\S]*?)<\\/section>/i);\nconst intro = secMatch ? secMatch[1] : html;\n\n// 3) Collect the first two <strong>₹…</strong> numbers in that section: [perGram, perKg]\nconst nums = [];\nconst strongRe = /<strong>\\s*(?:₹|&#8377;)?\\s*([\\d,]+)\\s*<\\/strong>/gi;\nlet m;\nwhile ((m = strongRe.exec(intro)) !== null) {\n  nums.push(toNum(m[1]));\n  if (nums.length >= 2) break; // we only need 2 values\n}\n\n// 4) Fallbacks: if not found in the intro, try explicit label matches anywhere in the page\nlet perGram = nums[0] ?? null;\nlet perKg   = nums[1] ?? null;\n\nif (perGram == null) {\n  const mg = html.match(/Silver\\s*\\/\\s*g\\s*(?:₹|&#8377;)?\\s*([\\d,]+)/i);\n  if (mg) perGram = toNum(mg[1]);\n}\nif (perKg == null) {\n  const mk = html.match(/Silver\\s*\\/\\s*kg\\s*(?:₹|&#8377;)?\\s*([\\d,]+)/i);\n  if (mk) perKg = toNum(mk[1]);\n}\n\n// 5) Return ONE item with the two requested columns + timestamp\nconst row = {\n  Timestamp: nowISO,\n  Per_Gram: perGram ?? null,\n  Per_KG: perKg ?? null,\n};\n\nreturn [{ json: row }];"
+      },
+      "id": "23b31536-0f1d-4359-bca1-228b98ee66f7",
+      "name": "Parse GoodreturnsSilver",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        656
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// FUNCTION node (Run Once for All Items)\n// Output ONE row with columns: Timestamp, 24K_999, 22K_916, 18K_750\n\n// 1) Pick up HTML (works with Return Full Response ON/OFF)\nconst src = items?.[0]?.json;\nconst html = typeof src === 'string' ? src : (src?.data ?? src?.body ?? '');\nif (!html) { return []; }\n\nconst nowISO = new Date().toISOString();\n\n// 2) Isolate the intro section/paragraph where Goodreturns prints the three national rates\n// (On the live page, these appear inside: <section id=\"gr_top_intro_content\"> ... )\n// Then inside a <p> that mentions \"24 karat\" / \"24K\".\nconst secMatch = html.match(/<section[^>]+id=[\"']gr_top_intro_content[\"'][^>]*>([\\s\\S]*?)<\\/section>/i);\nconst intro = secMatch ? secMatch[1] : html;\n\n// Prefer the paragraph that contains \"24 karat gold\" (or \"24K\")\nconst pMatch = intro.match(/<p[^>]*>[\\s\\S]*?(?:24\\s*karat|24\\s*K)[\\s\\S]*?<\\/p>/i);\nconst paragraph = pMatch ? pMatch[0] : intro;\n\n// 3) Capture three <strong>₹…</strong> numbers in order (24K → 22K → 18K)\nconst toNum = (s) => Number((s || '').replace(/[^\\d]/g, ''));\nconst strongNums = [];\nconst strongRe = /<strong>\\s*(?:₹|&#8377;)?\\s*([\\d,]+)\\s*<\\/strong>/gi;\nlet m;\nwhile ((m = strongRe.exec(paragraph)) !== null) {\n  strongNums.push(toNum(m[1]));\n  if (strongNums.length >= 3) break;\n}\n\n// Fallback if structure changes: try to locate each label separately\nfunction findNearestBefore(labelRegex) {\n  const match = paragraph.match(labelRegex);\n  if (!match) return null;\n  const idx = match.index;\n  const start = Math.max(0, idx - 240);\n  const seg = paragraph.slice(start, idx);\n  const rev = seg.split('').reverse().join('');\n  const revRe = />gnorts\\/<\\s*([,\\d]+)\\s*(?:;7783&#|₹)?\\s*<gnorts</i;\n  const mr = rev.match(revRe);\n  if (!mr) return null;\n  const num = mr[1].split('').reverse().join('');\n  return toNum(num);\n}\n\nlet g24 = strongNums[0] ?? null;\nlet g22 = strongNums[1] ?? null;\nlet g18 = strongNums[2] ?? null;\n\nif (g24 == null) g24 = findNearestBefore(/(?:24\\s*karat|24\\s*K)\\b/i);\nif (g22 == null) g22 = findNearestBefore(/(?:22\\s*karat|22\\s*K)\\b/i);\nif (g18 == null) g18 = findNearestBefore(/(?:18\\s*karat|18\\s*K)\\b/i);\n\n// 4) Return ONE item with all three columns\nconst row = {\n  Timestamp: nowISO,\n  '24K_999': g24 ?? null,\n  '22K_916': g22 ?? null,\n  '18K_750': g18 ?? null,\n};\n\n// n8n expects an array of items; we return ONE item\nreturn [{ json: row }];"
+      },
+      "id": "77947fe9-9251-4622-aabb-62172e48d47c",
+      "name": "Parse GoodreturnsGold",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        464
+      ],
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "content": "*💰TODAY’S GOLD & SILVER RATES*\n\n*🏅24K (999):*\nOpen: ₹{{ $json.ibja_gold_999_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_999_pm }} *Per 10g*\n\n*🥇22K (916):*\nOpen: ₹{{ $json.ibja_gold_916_am }} *Per 10g*\nClose: ₹{{ $json.ibja_gold_916_pm }} *Per 10g*\n\n*🥈Silver 999:*\nOpen: ₹{{ $json.ibja_silver_999_am }} */kg*\nClose: ₹{{ $json.ibja_silver_999_pm }} */kg*\n\n```Note: 1️⃣ Rates exclude GST & Making Charges. 2️⃣ IBJA rates are the industry standard for Banks & NBFCs. 3️⃣ For information only; not affiliated with IBJA.```"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        784,
+        48
+      ],
+      "id": "b7270a45-b7a2-457f-8c41-2067b281924d",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 3,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1120,
+        448
+      ],
+      "id": "835e794f-c97a-4a5b-92b4-717648f33894",
+      "name": "Merge"
+    }
+  ],
+  "connections": {
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch IBJA HTML",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Goodreturns Gold",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Goodreturns Silver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch IBJA HTML": {
+      "main": [
+        [
+          {
+            "node": "Parse IBJA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse IBJA": {
+      "main": [
+        [
+          {
+            "node": "Append to Google Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch MCX HTML": {
+      "main": [
+        [
+          {
+            "node": "Parse MCX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse MCX": {
+      "main": [
+        []
+      ]
+    },
+    "Append to Google Sheet": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send the message": {
+      "main": [
+        []
+      ]
+    },
+    "Cron (Daily 12:31 & 18:40 IST)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Goodreturns Gold": {
+      "main": [
+        [
+          {
+            "node": "Parse GoodreturnsGold",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Goodreturns Silver": {
+      "main": [
+        [
+          {
+            "node": "Parse GoodreturnsSilver",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append to Google Sheet1": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Append to Google Sheet2": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Parse GoodreturnsSilver": {
+      "main": [
+        [
+          {
+            "node": "Append to Google Sheet2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GoodreturnsGold": {
+      "main": [
+        [
+          {
+            "node": "Append to Google Sheet1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Send the message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f942f3e149662d29771bc0758b499f2350aca1856aa9f3256266557881851681"
+  }
+}
